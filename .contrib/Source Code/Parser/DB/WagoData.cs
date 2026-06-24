@@ -1,5 +1,5 @@
 ﻿using ATT.DB.Types;
-using Csv;
+using Sylvan.Data.Csv;
 using System;
 using System.Collections;
 using System.Collections.Concurrent;
@@ -1086,14 +1086,6 @@ namespace ATT.DB
         #endregion
         #region Cache Helper
         /// <summary>
-        /// The default CSV Options to use for Wago Data Modules.
-        /// </summary>
-        private static readonly CsvOptions DEFAULT_CSV_OPTIONS = new CsvOptions
-        {
-            AllowNewLineInEnclosedFieldValues = true
-        };
-
-        /// <summary>
         /// The Cache class retains useful Type-specific data to ensure that the fastest parsing and data storage methods are utilized.
         /// </summary>
         /// <typeparam name="T">The subtype.</typeparam>
@@ -1195,42 +1187,51 @@ namespace ATT.DB
             /// <exception cref="InvalidProgramException"></exception>
             public static void LoadFromCSV(string content, string locale)
             {
-                foreach (var line in CsvReader.ReadFromText(content, DEFAULT_CSV_OPTIONS))
+                if (string.IsNullOrEmpty(content)) return;
+
+                var options = new CsvDataReaderOptions
                 {
-                    T obj = (T)Activator.CreateInstance(ParseType);
-                    foreach (var header in line.Headers)
+                    // Match the previous Csv library: auto-detect the delimiter (Delimiter left null) and use
+                    // standard RFC-4180 quoting with a header row. The buffer is enlarged from the 64KB default so
+                    // long localized text records never exceed the parser's fixed buffer.
+                    BufferSize = 0x100000,
+                    OwnsReader = false,
+                };
+
+                using (var textReader = new StringReader(content))
+                using (var csv = CsvDataReader.Create(textReader, options))
+                {
+                    // The header layout is constant for the whole file, so resolve each column's target property once.
+                    int fieldCount = csv.FieldCount;
+                    var bindings = new List<KeyValuePair<int, PropertyInfo>>(fieldCount);
+                    for (int i = 0; i < fieldCount; i++)
                     {
-                        if (AllPropertiesByName.TryGetValue(header, out var property))
+                        if (AllPropertiesByName.TryGetValue(csv.GetName(i), out var property))
+                            bindings.Add(new KeyValuePair<int, PropertyInfo>(i, property));
+                    }
+
+                    while (csv.Read())
+                    {
+                        T obj = (T)Activator.CreateInstance(ParseType);
+                        int rowFieldCount = csv.RowFieldCount;
+                        foreach (var binding in bindings)
                         {
-                            if (line.HasColumn(header))
+                            // Mirror the previous HasColumn behavior: skip columns missing from this row.
+                            if (binding.Key >= rowFieldCount) continue;
+
+                            var value = csv.GetString(binding.Key);
+                            try
                             {
-                                var value = line[header];
-                                try
-                                {
-                                    property.SetValue(obj, Convert.ChangeType(value, property.PropertyType, System.Globalization.CultureInfo.InvariantCulture));
-                                }
-                                catch (Exception ex)
-                                {
-                                    throw new InvalidProgramException($"Failed converting property {ParseType.Name}.{property.Name} [{property.PropertyType.Name}] from: '{value}' [{value.GetType().Name}]", ex);
-                                }
+                                binding.Value.SetValue(obj, Convert.ChangeType(value, binding.Value.PropertyType, System.Globalization.CultureInfo.InvariantCulture));
+                            }
+                            catch (Exception ex)
+                            {
+                                throw new InvalidProgramException($"Failed converting property {ParseType.Name}.{binding.Value.Name} [{binding.Value.PropertyType.Name}] from: '{value}' [{value.GetType().Name}]", ex);
                             }
                         }
-                        /*
-                        else
-                        {
-                            Trace.WriteLine($"WAGO {ParseType.Name}: Missing property '{header}' in class.");
-                        }
-                        */
+                        CachedData.TryAdd(obj.ID, obj);
+                        StoreLocalizedData(obj, locale);
                     }
-                    if (CachedData.TryAdd(obj.ID, obj))
-                    {
-                        //Framework.LogWarn($"WagoData.Load.{ParseType.Name}.Add: {obj.ID}", line.Values);
-                    }
-                    else
-                    {
-                        //Framework.LogWarn($"WagoData.Load.{ParseType.Name}.Skip: {obj.ID}", line.Values);
-                    }
-                    StoreLocalizedData(obj, locale);
                 }
 
                 Framework.LogDebug($"INFO: Wago Type {ParseType.Name} Loaded with {CachedData.Count} entries");
