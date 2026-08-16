@@ -696,7 +696,8 @@ CacheFields = function(group, skipMapCaching, cacheName)
 				end
 			end
 		end
-		app.wipearray(cacheGroupForModItemID)
+		-- Release the potentially large startup-sized scratch array instead of retaining its backing storage.
+		cacheGroupForModItemID = {}
 		-- app.PrintDebug("caching for modItemID done")
 	end
 	--print(("Cache Fields: %.3f %s"):format((GetTimePreciseSec() - start) * 1000, group.text));
